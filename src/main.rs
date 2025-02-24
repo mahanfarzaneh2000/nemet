@@ -45,6 +45,7 @@ mod macros;
 mod optim;
 mod parser;
 mod terms;
+mod ir;
 #[cfg(test)]
 mod tests;
 mod utils;
@@ -59,7 +60,10 @@ use crate::utils::padding_right;
 pub static VERSION: &str = "v0.8.1";
 
 /// Terget name for assembling using Nasm
-fn assembler_target() -> &'static str {
+fn assembler_target(co: &CompilerOptions) -> &'static str {
+    if co.target_platform == 1 {
+        return "win64";
+    }
     if cfg!(windows) {
         "win64"
     } else {
@@ -102,58 +106,66 @@ pub fn help_command(program_name: &str) {
     println!("Options:");
     println!(
         "  {} Specify output path (default: \"./build/input_file\")",
-        padding_right("-o <output_path>",10)
+        padding_right("-o <output_path>", 20)
     );
     println!(
         "  {} Simulate (Interpet) the program for debugging and running on unsupported OS",
-        padding_right("-s | --simulate",10)
+        padding_right("-s | --simulate", 20)
     );
     println!(
         "  {} dump instructions in a binary file",
-        padding_right("-b | --bin",10)
+        padding_right("-b | --bin", 20)
     );
     println!(
         "  {} use Nasm Assembler to assemble generated code",
-        padding_right("--nasm",10)
+        padding_right("--nasm", 20)
     );
     println!(
         "  {} Do not link the generated object file",
-        padding_right("--no-link",10)
+        padding_right("--no-link", 20)
     );
     println!(
         "  {} Only Generates an asm file",
-        padding_right("--no-assemble",10)
+        padding_right("--no-assemble", 20)
     );
     println!(
         "  {} Do not remove the generated asm file",
-        padding_right("--keep-asm",10)
+        padding_right("--keep-asm", 20)
     );
     println!(
         "  {} Do not remove the generated object file",
-        padding_right("--keep-obj",10)
+        padding_right("--keep-obj", 20)
     );
-    println!("  {} Use C library Dynamicaly", padding_right("--use-libc",10));
+    println!(
+        "  {} Use C library Dynamicaly",
+        padding_right("--use-libc", 20)
+    );
     println!(
         "  {} Search for library LIBNAME",
-        padding_right("-l<LIBNAME>",10)
+        padding_right("-l<LIBNAME>", 20)
     );
     println!(
         "  {} add directory to library search path",
-        padding_right("-L<DIR>",10)
+        padding_right("-L<DIR>", 20)
     );
-    println!("  {} Show help", padding_right("-h, --help",10));
-    println!("  {} Show Version", padding_right("-v, --version",10));
+    println!(
+        "  {} Generate a dynamic library",
+        padding_right("--dynamic-lib", 20)
+    );
+    println!("  {} Generate a static library", padding_right("--lib", 20));
+    println!("  {} Show help", padding_right("-h, --help", 20));
+    println!("  {} Show Version", padding_right("-v, --version", 20));
 }
 
 /// Runs External commands for generating the object files
-pub fn assemble_with_nasm(path: PathBuf) {
+pub fn assemble_with_nasm(path: PathBuf, co: &CompilerOptions) {
     log_info!(
         "Assembling for {} - generaiting {}",
-        assembler_target(),
+        assembler_target(co),
         path.with_extension("o").to_string_lossy()
     );
     let nasm_output = Command::new("nasm")
-        .arg(format!("-f{}", assembler_target()))
+        .arg(format!("-f{}", assembler_target(co)))
         .arg("-o")
         .arg(path.with_extension("o"))
         .arg(path.with_extension("asm"))
@@ -188,6 +200,49 @@ pub fn link_to_exc(path: PathBuf, co: &CompilerOptions) {
     }
 }
 
+// Link to Static Library
+pub fn link_to_static_lib(path: PathBuf, _: &CompilerOptions) {
+    log_info!(
+        "Archiving object file - generating {}",
+        path.with_extension("a").to_string_lossy()
+    );
+    let linker_output = Command::new("ar")
+        .arg("-cvq")
+        .arg(path.with_extension("a"))
+        .arg(path.with_extension("o"))
+        .output()
+        .expect("Can not archive using ar command!");
+    if !linker_output.status.success() {
+        log_error!("Failed to Generate Static Library: Status code non zero");
+        eprintln!("{}", String::from_utf8(linker_output.stderr).unwrap());
+    } else {
+        log_success!("Static Library file have been Generated!");
+    }
+}
+
+// Link to Dynamin Library
+pub fn link_to_dynamic_lib(path: PathBuf, co: &CompilerOptions) {
+    log_info!(
+        "Linking object file - generating {}",
+        path.with_extension("so").to_string_lossy()
+    );
+    let linker_output = Command::new("ld")
+        .arg("-shared")
+        .arg("-o")
+        .arg(path.with_extension("so"))
+        .arg(path.with_extension("o"))
+        .args(["-dynamic-linker", "/usr/lib64/ld-linux-x86-64.so.2"])
+        .args(&co.linker_flags)
+        .output()
+        .expect("Can not link using ld command!");
+    if !linker_output.status.success() {
+        log_error!("Failed to Link Dynamic Library: Status code non zero");
+        eprintln!("{}", String::from_utf8(linker_output.stderr).unwrap());
+    } else {
+        log_success!("Dynamic Library file have been Generated!");
+    }
+}
+
 pub fn setup_compiler(input: String, co: &CompilerOptions) {
     let out_path = match co.output_path.clone() {
         None => get_output_path_from_input(input.clone().into()),
@@ -206,11 +261,7 @@ pub fn setup_compiler(input: String, co: &CompilerOptions) {
         if co.no_assembling {
             return;
         }
-        assemble_with_nasm(out_path.clone());
-        if co.no_linking {
-            return;
-        }
-        link_to_exc(out_path.clone(), co);
+        assemble_with_nasm(out_path.clone(), co);
     } else {
         if co.create_bin {
             log_info!("Generating binary file...");
@@ -220,10 +271,15 @@ pub fn setup_compiler(input: String, co: &CompilerOptions) {
         log_info!("Generating elf object file...");
         crate::formats::elf::generate_elf(out_path.as_path(), &mut compiler_context);
         log_success!("Elf object file Generated!");
-        if co.no_linking || co.dynamic_lib || co.static_lib {
-            return;
+    }
+    if !co.no_linking {
+        if co.dynamic_lib {
+            link_to_dynamic_lib(out_path.clone(), co);
+        } else if co.static_lib {
+            link_to_static_lib(out_path.clone(), co);
+        } else {
+            link_to_exc(out_path.clone(), co);
         }
-        link_to_exc(out_path.clone(), co);
     }
     if !co.keep_asm && remove_file(out_path.with_extension("asm")).is_ok() {
         log_info!("Removing asm files")
@@ -274,7 +330,7 @@ fn collect_compiler_options(args: &mut Args) -> (String, CompilerOptions) {
                 co.static_lib = true;
                 co.dynamic_lib = false;
                 co.keep_obj = true;
-            },
+            }
             "--dynamic-lib" => {
                 co.static_lib = false;
                 co.dynamic_lib = true;
