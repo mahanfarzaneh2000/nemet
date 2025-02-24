@@ -45,6 +45,7 @@ mod macros;
 mod optim;
 mod parser;
 mod terms;
+mod ir;
 #[cfg(test)]
 mod tests;
 mod utils;
@@ -59,7 +60,10 @@ use crate::utils::padding_right;
 pub static VERSION: &str = "v0.8.1";
 
 /// Terget name for assembling using Nasm
-fn assembler_target() -> &'static str {
+fn assembler_target(co: &CompilerOptions) -> &'static str {
+    if co.target_platform == 1 {
+        return "win64";
+    }
     if cfg!(windows) {
         "win64"
     } else {
@@ -154,14 +158,14 @@ pub fn help_command(program_name: &str) {
 }
 
 /// Runs External commands for generating the object files
-pub fn assemble_with_nasm(path: PathBuf) {
+pub fn assemble_with_nasm(path: PathBuf, co: &CompilerOptions) {
     log_info!(
         "Assembling for {} - generaiting {}",
-        assembler_target(),
+        assembler_target(co),
         path.with_extension("o").to_string_lossy()
     );
     let nasm_output = Command::new("nasm")
-        .arg(format!("-f{}", assembler_target()))
+        .arg(format!("-f{}", assembler_target(co)))
         .arg("-o")
         .arg(path.with_extension("o"))
         .arg(path.with_extension("asm"))
@@ -257,7 +261,7 @@ pub fn setup_compiler(input: String, co: &CompilerOptions) {
         if co.no_assembling {
             return;
         }
-        assemble_with_nasm(out_path.clone());
+        assemble_with_nasm(out_path.clone(), co);
     } else {
         if co.create_bin {
             log_info!("Generating binary file...");
